@@ -2,7 +2,6 @@ import os
 import sys
 import json
 import asyncio
-import subprocess
 import websockets
 from datetime import datetime, timedelta
 from fastapi import FastAPI, HTTPException
@@ -15,7 +14,7 @@ DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3"
 APP_ID = os.getenv("DERIV_APP_ID", "1089")
 SYMBOL = "stpRNG"
 GRANULARITY = 60
-SEQUENCE_LENGTH = 20
+SEQUENCE_LENGTH = 21  # Fetch 21 candles, use last 20 starting at index 1
 
 # --- Logger Setup ---
 logger.remove()
@@ -32,7 +31,7 @@ app.add_middleware(
 )
 
 # --- Global Model ---
-mind = Mind(sequence_length=SEQUENCE_LENGTH, download_on_init=True)
+mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
 
 # --- WebSocket Candle Fetch ---
 async def get_candles():
@@ -41,7 +40,7 @@ async def get_candles():
         "ticks_history": SYMBOL,
         "count": SEQUENCE_LENGTH,
         "granularity": GRANULARITY,
-        "end": end_time,
+        "end": "latest",
         "style": "candles"
     }
 
@@ -49,7 +48,7 @@ async def get_candles():
         try:
             async with websockets.connect(f"{DERIV_WS_URL}?app_id={APP_ID}") as ws:
                 await ws.send(json.dumps(payload))
-                response = await ws.recv()
+                response = await asyncio.wait_for(ws.recv(), timeout=5)
                 data = json.loads(response)
 
                 if "candles" in data and isinstance(data["candles"], list):
@@ -77,13 +76,15 @@ async def predict():
         raise HTTPException(status_code=422, detail="Not enough candle data")
 
     try:
-        prediction = mind.predict(candles)
-        last = candles[-1]
+        input_sequence = candles[1:]  # Use candles from index 1 to 20
+        last_candle = candles[-1]     # candles[20]
+        prediction = mind.predict(input_sequence)
+
         return {
             "predicted_high": prediction["Predicted High"],
             "predicted_low": prediction["Predicted Low"],
-            "last_candle_high": last[0],
-            "last_candle_low": last[1]
+            "last_candle_high": last_candle[0],
+            "last_candle_low": last_candle[1]
         }
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
@@ -100,7 +101,7 @@ async def reload_model_daily():
         await asyncio.sleep(wait_seconds)
 
         try:
-            mind = Mind(sequence_length=SEQUENCE_LENGTH, download_on_init=True)
+            mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
             logger.info("🔁 Model reloaded successfully at midnight.")
         except Exception as e:
             logger.error(f"❌ Failed to reload model: {str(e)}")
@@ -109,8 +110,3 @@ async def reload_model_daily():
 @app.on_event("startup")
 async def startup_tasks():
     asyncio.create_task(reload_model_daily())
-    try:
-        subprocess.Popen(["python3", "trader.py"])
-        logger.info("✅ trader.py started successfully")
-    except Exception as e:
-        logger.error(f"❌ Failed to launch trader.py: {str(e)}")
