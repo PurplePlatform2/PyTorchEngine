@@ -2,9 +2,12 @@ services:
   - type: web
     name: PurpleBot-Mind
     env: python
+    plan: free
+    region: oregon
+    runtime: python
     buildCommand: pip install --no-cache-dir -r requirements.txt
     startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-    plan: free
+    autoDeploy: true
     envVars:
       - key: DERIV_APP_ID
         value: "1089"
@@ -14,6 +17,3 @@ services:
         value: "354656419316393"
       - key: CLOUDINARY_API_SECRET
         value: "M-Trl9ltKDHyo1dIP2AaLOG-WPM"
-    autoDeploy: true
-    runtime: python
-    region: oregon
