@@ -77,7 +77,7 @@ async def predict():
 
     try:
         input_sequence = candles[1:]  # Use candles from index 1 to 20
-        last_candle = candles[-1]     # candles[20]
+        last_candle = input_sequence[0]     # candles[20]
         prediction = mind.predict(input_sequence)
 
         return {
