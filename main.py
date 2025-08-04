@@ -4,9 +4,10 @@ import json
 import asyncio
 import websockets
 from datetime import datetime, timedelta
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
+from contextlib import asynccontextmanager
 from mind import Mind
 
 # --- Constants ---
@@ -20,8 +21,38 @@ SEQUENCE_LENGTH = 21  # Fetch 21 candles, use last 20 starting at index 1
 logger.remove()
 logger.add(sys.stdout, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}")
 
-# --- FastAPI Setup ---
-app = FastAPI()
+# --- Model Reload Task ---
+async def reload_model_daily(app: FastAPI):
+    while True:
+        now = datetime.now()
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        wait_seconds = (next_midnight - now).total_seconds()
+        logger.info(f"⏳ Waiting {wait_seconds / 3600:.2f} hours until midnight model reload...")
+        await asyncio.sleep(wait_seconds)
+
+        try:
+            app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
+            logger.info("🔁 Model reloaded successfully at midnight.")
+        except Exception as e:
+            logger.error(f"❌ Failed to reload model: {str(e)}")
+
+# --- Lifespan Context ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("⚙️ Waking Mind... Attempting to load model from the cloud.")
+    try:
+        app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
+        logger.success("✅ Model loaded successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to load model on startup: {str(e)}")
+        sys.exit(1)
+
+    asyncio.create_task(reload_model_daily(app))
+    yield
+    # Optional cleanup
+
+# --- App Initialization ---
+app = FastAPI(lifespan=lifespan)
 app.add_middleware(
     CORSMiddleware,
     allow_origins=["*"],
@@ -30,12 +61,8 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# --- Global Model ---
-mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
-
-# --- WebSocket Candle Fetch ---
+# --- Candle Fetch ---
 async def get_candles():
-    end_time = int((datetime.utcnow() - timedelta(minutes=1)).timestamp())
     payload = {
         "ticks_history": SYMBOL,
         "count": SEQUENCE_LENGTH,
@@ -63,11 +90,14 @@ async def get_candles():
 
 # --- API Endpoints ---
 @app.get("/health")
-async def health_check():
+async def health_check(request: Request):
+    mind = request.app.state.mind
     return {"status": "ok", "model_loaded": mind.model_loaded_successfully}
 
 @app.get("/predict")
-async def predict():
+async def predict(request: Request):
+    mind = request.app.state.mind
+
     if not mind.model_loaded_successfully:
         raise HTTPException(status_code=503, detail="Model not loaded")
 
@@ -77,7 +107,7 @@ async def predict():
 
     try:
         input_sequence = candles[1:]  # Use candles from index 1 to 20
-        last_candle = input_sequence[0]     # candles[20]
+        last_candle = input_sequence[0]  # candles[1]
         prediction = mind.predict(input_sequence)
 
         return {
@@ -90,23 +120,7 @@ async def predict():
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(status_code=500, detail="Prediction failed")
 
-# --- Background Task: Daily Model Reload ---
-async def reload_model_daily():
-    global mind
-    while True:
-        now = datetime.now()
-        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        wait_seconds = (next_midnight - now).total_seconds()
-        logger.info(f"⏳ Waiting {wait_seconds / 3600:.2f} hours until midnight model reload...")
-        await asyncio.sleep(wait_seconds)
-
-        try:
-            mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
-            logger.info("🔁 Model reloaded successfully at midnight.")
-        except Exception as e:
-            logger.error(f"❌ Failed to reload model: {str(e)}")
-
-# --- Startup Tasks ---
-@app.on_event("startup")
-async def startup_tasks():
-    asyncio.create_task(reload_model_daily())
+# --- Run the app if needed ---
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run("main:app", host="0.0.0.0", port=8000)
