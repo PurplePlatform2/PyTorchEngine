@@ -1,18 +1,9 @@
 services:
   - type: web
-    name: PurpleBot-Mind
+    name: pytorch-engine
+    env: docker
+    dockerfilePath: ./Dockerfile
     plan: free
-    region: oregon
-    runtime: python
-    buildCommand: pip install --no-cache-dir --prefer-binary -r requirements.txt
-    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
-    autoDeploy: true
     envVars:
-      - key: DERIV_APP_ID
-        value: "1089"
-      - key: CLOUDINARY_CLOUD_NAME
-        value: "dj4bwntzb"
-      - key: CLOUDINARY_API_KEY
-        value: "354656419316393"
-      - key: CLOUDINARY_API_SECRET
-        value: "M-Trl9ltKDHyo1dIP2AaLOG-WPM"
+      - key: PORT
+        value: 8000
