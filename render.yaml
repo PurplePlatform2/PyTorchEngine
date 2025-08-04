@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: PurpleBot-Mind
+    env: python
+    buildCommand: pip install --no-cache-dir -r requirements.txt
+    startCommand: uvicorn main:app --host 0.0.0.0 --port 10000
+    plan: starter
+    envVars:
+      - key: DERIV_APP_ID
+        value: "1089"
+      - key: CLOUDINARY_CLOUD_NAME
+        value: "dj4bwntzb"
+      - key: CLOUDINARY_API_KEY
+        value: "354656419316393"
+      - key: CLOUDINARY_API_SECRET
+        value: "M-Trl9ltKDHyo1dIP2AaLOG-WPM"
+    autoDeploy: true
+    healthCheckPath: /health
+    runtime: python
+    region: oregon
