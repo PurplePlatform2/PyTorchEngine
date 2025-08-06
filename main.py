@@ -15,7 +15,7 @@ DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3"
 APP_ID = os.getenv("DERIV_APP_ID", "1089")
 SYMBOL = "stpRNG"
 GRANULARITY = 60
-SEQUENCE_LENGTH = 21  # Fetch 21 candles, use last 20 starting at index 1
+SEQUENCE_LENGTH = 21  # Fetch 21 candles, use candles[1:21] to predict candle[0]
 
 # --- Logger Setup ---
 logger.remove()
@@ -79,9 +79,10 @@ async def get_candles():
                 data = json.loads(response)
 
                 if "candles" in data and isinstance(data["candles"], list):
-                    candles = [[c["high"], c["low"]] for c in data["candles"]]
-                    if len(candles) >= SEQUENCE_LENGTH:
-                        return candles
+                    reversed_candles = list(reversed(data["candles"]))  # ✅ reverse so candles[0] is most recent
+                    hl_pairs = [[c["high"], c["low"]] for c in reversed_candles]
+                    if len(hl_pairs) >= SEQUENCE_LENGTH:
+                        return hl_pairs
         except Exception as e:
             logger.warning(f"Attempt {attempt + 1}: Candle fetch failed - {str(e)}")
             await asyncio.sleep(1)
@@ -106,15 +107,16 @@ async def predict(request: Request):
         raise HTTPException(status_code=422, detail="Not enough candle data")
 
     try:
-        input_sequence = candles[1:]  # Use candles from index 1 to 20
-        last_candle = input_sequence[0]  # candles[1]
+        input_sequence = candles[1:]     # ✅ candles[1] to candles[20]
+        target_candle = candles[0]       # ✅ candle[0] is the most recent actual
+
         prediction = mind.predict(input_sequence)
 
         return {
             "predicted_high": prediction["Predicted High"],
             "predicted_low": prediction["Predicted Low"],
-            "last_candle_high": last_candle[0],
-            "last_candle_low": last_candle[1]
+            "actual_high": target_candle[0],
+            "actual_low": target_candle[1]
         }
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
