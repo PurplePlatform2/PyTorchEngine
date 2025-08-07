@@ -9,59 +9,52 @@ from fastapi.middleware.cors import CORSMiddleware
 from loguru import logger
 from contextlib import asynccontextmanager
 from mind import Mind
+import numpy as np
 
 # --- Constants ---
 DERIV_WS_URL = "wss://ws.derivws.com/websockets/v3"
 APP_ID = os.getenv("DERIV_APP_ID", "1089")
 SYMBOL = "stpRNG"
 GRANULARITY = 60
-SEQUENCE_LENGTH = 21  # Fetch 21 candles, use candles[1:21] to predict candle[0]
+SEQUENCE_LENGTH = 21  # Predict with last 20, output 1
 
 # --- Logger Setup ---
 logger.remove()
 logger.add(sys.stdout, format="{time:YYYY-MM-DD HH:mm:ss} | {level} | {message}")
 
-# --- Model Reload Task ---
-async def reload_model_daily(app: FastAPI):
-    while True:
-        now = datetime.now()
-        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
-        wait_seconds = (next_midnight - now).total_seconds()
-        logger.info(f"⏳ Waiting {wait_seconds / 3600:.2f} hours until midnight model reload...")
-        await asyncio.sleep(wait_seconds)
+# --- Candle Fetcher for arbitrary count ---
+async def fetch_candles(count=1000, granularity=GRANULARITY):
+    uri = f"{DERIV_WS_URL}?app_id={APP_ID}"
+    candles = []
+    end = "latest"
+    remaining = count
 
-        try:
-            app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
-            logger.info("🔁 Model reloaded successfully at midnight.")
-        except Exception as e:
-            logger.error(f"❌ Failed to reload model: {str(e)}")
+    async with websockets.connect(uri) as ws:
+        while remaining > 0:
+            batch_size = min(5000, remaining)
+            await ws.send(json.dumps({
+                "ticks_history": SYMBOL,
+                "end": end,
+                "count": batch_size,
+                "style": "candles",
+                "granularity": granularity
+            }))
+            res = json.loads(await ws.recv())
+            if "error" in res:
+                raise RuntimeError(f"❌ Deriv API Error: {res['error']['message']}")
 
-# --- Lifespan Context ---
-@asynccontextmanager
-async def lifespan(app: FastAPI):
-    logger.info("⚙️ Waking Mind... Attempting to load model from the cloud.")
-    try:
-        app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
-        logger.success("✅ Model loaded successfully.")
-    except Exception as e:
-        logger.error(f"❌ Failed to load model on startup: {str(e)}")
-        sys.exit(1)
+            data = res.get("candles", [])
+            if not data:
+                break
 
-    asyncio.create_task(reload_model_daily(app))
-    yield
-    # Optional cleanup
+            candles = data + candles
+            remaining -= len(data)
+            end = data[0]["epoch"] - 1
+            await asyncio.sleep(0.2)
 
-# --- App Initialization ---
-app = FastAPI(lifespan=lifespan)
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=["*"],
-    allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
-)
+    return list(reversed(candles[-count:]))
 
-# --- Candle Fetch ---
+# --- Short Candle Fetch for Prediction ---
 async def get_candles():
     payload = {
         "ticks_history": SYMBOL,
@@ -79,7 +72,7 @@ async def get_candles():
                 data = json.loads(response)
 
                 if "candles" in data and isinstance(data["candles"], list):
-                    reversed_candles = list(reversed(data["candles"]))  # ✅ reverse so candles[0] is most recent
+                    reversed_candles = list(reversed(data["candles"]))
                     hl_pairs = [[c["high"], c["low"]] for c in reversed_candles]
                     if len(hl_pairs) >= SEQUENCE_LENGTH:
                         return hl_pairs
@@ -88,6 +81,62 @@ async def get_candles():
             await asyncio.sleep(1)
 
     raise HTTPException(status_code=504, detail="Failed to fetch candle data")
+
+# --- Model Reload Task (midnight) ---
+async def reload_model_daily(app: FastAPI):
+    while True:
+        now = datetime.now()
+        next_midnight = (now + timedelta(days=1)).replace(hour=0, minute=0, second=0, microsecond=0)
+        wait_seconds = (next_midnight - now).total_seconds()
+        logger.info(f"⏳ Waiting {wait_seconds / 3600:.2f} hours until midnight model reload...")
+        await asyncio.sleep(wait_seconds)
+
+        try:
+            app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
+            logger.info("🔁 Model reloaded successfully at midnight.")
+        except Exception as e:
+            logger.error(f"❌ Failed to reload model: {str(e)}")
+
+# --- Periodic Training Task (hourly) ---
+async def hourly_training(app: FastAPI):
+    while True:
+        logger.info("🧠 Starting hourly training...")
+        try:
+            candles = await fetch_candles(1000)
+            hl = np.array([[c["high"], c["low"]] for c in candles])
+            mind = app.state.mind
+            result = mind.learn(hl, epochs=5, lr=0.001, batch_size=64)
+            mind.sleep()
+            logger.info(f"✅ Hourly training complete: {result}")
+        except Exception as e:
+            logger.error(f"❌ Hourly training failed: {str(e)}")
+
+        await asyncio.sleep(3600)
+
+# --- Lifespan Context ---
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    logger.info("⚙️ Waking Mind... Attempting to load model from the cloud.")
+    try:
+        app.state.mind = Mind(sequence_length=SEQUENCE_LENGTH - 1, download_on_init=True)
+        logger.success("✅ Model loaded successfully.")
+    except Exception as e:
+        logger.error(f"❌ Failed to load model on startup: {str(e)}")
+        sys.exit(1)
+
+    asyncio.create_task(reload_model_daily(app))
+    asyncio.create_task(hourly_training(app))
+    yield
+
+# --- App Initialization ---
+app = FastAPI(lifespan=lifespan)
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
 # --- API Endpoints ---
 @app.get("/health")
@@ -107,8 +156,8 @@ async def predict(request: Request):
         raise HTTPException(status_code=422, detail="Not enough candle data")
 
     try:
-        input_sequence = candles[1:]     # ✅ candles[1] to candles[20]
-        target_candle = candles[0]       # ✅ candle[0] is the most recent actual
+        input_sequence = candles[1:]     # candles[1:21]
+        target_candle = candles[0]       # candle[0]
 
         prediction = mind.predict(input_sequence)
 
@@ -121,6 +170,21 @@ async def predict(request: Request):
     except Exception as e:
         logger.error(f"Prediction error: {str(e)}")
         raise HTTPException(status_code=500, detail="Prediction failed")
+
+@app.post("/train")
+async def train_now(request: Request):
+    mind = request.app.state.mind
+
+    try:
+        logger.info("🔁 Manual /train endpoint called...")
+        candles = await fetch_candles(1000)
+        hl = np.array([[c["high"], c["low"]] for c in candles])
+        result = mind.learn(hl, epochs=5, lr=0.001, batch_size=64)
+        mind.sleep()
+        return {"status": "training_complete", "result": result}
+    except Exception as e:
+        logger.error(f"Manual training error: {str(e)}")
+        raise HTTPException(status_code=500, detail="Manual training failed")
 
 # --- Run the app if needed ---
 if __name__ == "__main__":
